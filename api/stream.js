@@ -47,5 +47,7 @@ export default async function handler(req, res) {
   }
 
   // Bütün daxili .ts seqmentləri tək bir axın kimi pleyerə göndərilir
-  res.status(200).send(combinedManifest);
+     res.setHeader("Content-Disposition", "attachment; filename=\"live.m3u8\"");
+   res.status(200).send(combinedManifest);
+
 }
