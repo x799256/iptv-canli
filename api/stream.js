@@ -1,63 +1,69 @@
 export default async function handler(req, res) {
-  // ÖZ REAL YOUTUBE M3U8 LİNKLƏRİNİZ
+  // 1. ÖZ REAL VİDEO LİNKLƏRİNİ BURA ARD-ARDA DÜZ (İstədiyin qədər artıra bilərsən)
   const youtubeStreams = [
-    "http://movies.yt-hls.workers.dev/ChS5CcxbXlc.m3u8",
-    "http://movies.yt-hls.workers.dev/PWFKYZ9cbis.m3u8",
-    "http://movies.yt-hls.workers.dev/c6-nkNe2W2I.m3u8"
+    "http://movies.yt-hls.workers.dev/0Y_aBF8CDzQ.m3u8",
+    "http://movies.yt-hls.workers.dev/-JCIUhtLrlE.m3u8",
+    "http://movies.yt-hls.workers.dev/AmgKXWUFNug.m3u8"
   ];
 
-  const totalVideos = youtubeStreams.length;
-  
-  // Hər videonun neçə dəqiqə yayımlanacağını təyin edin (məsələn: 10 dəqiqə)
-  const videoDurationMinutes = 10; 
-  
-  const currentMinutes = Math.floor(Date.now() / 60000);
-  const currentIndex = Math.floor(currentMinutes / videoDurationMinutes) % totalVideos;
-  
-  const targetUrl = youtubeStreams[currentIndex];
+  // Pleyerin hazırda neçənci videoda olduğunu linkdən oxuyuruq (?id=0, ?id=1...)
+  let currentId = parseInt(req.query.id) || 0;
+
+  // Əgər siyahıdakı bütün videolar bitibsə, avtomatik olaraq yenidən 1-ci videoya (0-a) qayıdır
+  if (currentId >= youtubeStreams.length) {
+    currentId = 0;
+  }
+
+  const targetUrl = youtubeStreams[currentId];
 
   try {
-    // 1. YouTube-dan orijinal m3u8 məlumatını çəkirik
+    // YouTube linkinə anlıq sorğu atıb təzə tokenli məlumatları alırıq
     const response = await fetch(targetUrl, {
       headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
     });
     
+    if (!response.ok) throw new Error("Video tapılmadı");
+    
     let text = await response.text();
     const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf("/") + 1);
-    let lines = text.split("\n");
     
-    // 2. IP qorumasını keçmək üçün pleyerə təmiz canlı TV manifesti hazırlayırıq
-    let liveManifest = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n";
-    // Media Sequence nömrəsini zamanla dəyişirik ki, pleyer keşləməsin və davamlı yeni parça istəsin
-    liveManifest += `#EXT-X-MEDIA-SEQUENCE:${Math.floor(Date.now() / 10000)}\n`;
-    liveManifest += "#EXT-X-DISCONTINUITY\n"; 
+    let lines = text.split("\n");
+    let cleanManifest = "";
 
     for (let line of lines) {
       line = line.trim();
-      if (line.startsWith("#EXTINF:")) {
-        liveManifest += line + "\n";
-      } else if (line && !line.startsWith("#")) {
-        // ƏN VACİB HİSSƏ: Video parçalarını birbaşa pleyerə vermirik.
-        // Onları pleyerə öz ev internetinin IP-si ilə birbaşa YT-HLS-dən yükləməsi üçün yönləndiririk.
-        // Bu sayədə həm video anında açılır, həm də pleyer bizim Vercel-dən qopa bilmir!
-        const fullTsUrl = line.startsWith("http") ? line : baseUrl + line;
-        liveManifest += fullTsUrl + "\n";
+      if (line && !line.startsWith("#") && !line.startsWith("http")) {
+        // Video seqmentlərini tam link halına salırıq
+        cleanManifest += baseUrl + line + "\n";
+      } else {
+        cleanManifest += line + "\n";
       }
     }
 
-    // Videonun bitdiyini deyən əmri silirik ki, pleyer dövr etməsin, canlı yayımda qalsın
-    liveManifest = liveManifest.replace("#EXT-X-ENDLIST", "");
+    // Növbəti videonun linkini hazırlayırıq
+    const nextId = currentId + 1;
+    const nextVideoUrl = `https://${req.headers.host}/api/stream?id=${nextId}`;
 
-    // Başlıqları təyin edirik
+    // ƏN VACİB FNDRİK: Pleyerə videonun bitdiyini (#EXT-X-ENDLIST) demirik!
+    // Onun yerinə pleyerə növbəti videonun linkini ötürürük ki, avtomatik ora keçsin
+    if (cleanManifest.includes("#EXT-X-ENDLIST")) {
+      cleanManifest = cleanManifest.replace(
+        "#EXT-X-ENDLIST",
+        `#EXT-X-DISCONTINUITY\n#EXT-X-STREAM-INF:BANDWIDTH=2000000\n${nextVideoUrl}\n`
+      );
+    } else {
+      // Əgər endlist yoxdursa, manifestin sonuna daxili keçid əlavə edirik
+      cleanManifest += `#EXT-X-DISCONTINUITY\n#EXT-X-STREAM-INF:BANDWIDTH=2000000\n${nextVideoUrl}\n`;
+    }
+
+    // Lazımi HLS başlıqları ilə pleyerə göndəririk
     res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-    
-    // Manifesti pleyerə göndəririk
-    res.status(200).send(liveManifest);
+    res.status(200).send(cleanManifest);
 
   } catch (err) {
-    // Hər hansı xəta olarsa, pleyeri qorumaq üçün birbaşa hədəf linkə yönləndiririk
-    res.redirect(302, targetUrl);
+    // Əgər hər hansı bir video xəta versə, pleyer donub qara ekranda qalmasın, dərhal növbətinə keçsin
+    res.redirect(`https://${req.headers.host}/api/stream?id=${currentId + 1}`);
   }
 }
